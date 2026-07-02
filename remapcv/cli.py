@@ -31,6 +31,9 @@ def scan(
     write_mapping: Path = typer.Option(
         None, "--write-mapping", "-w", help="Write a starter mapping.yaml to this path."
     ),
+    auto: Path = typer.Option(
+        None, "--auto", "-a", help="Auto-suggest class synonym groups and write mapping.yaml."
+    ),
 ):
     """Inspect datasets and list every class across all of them."""
     dss = scan_datasets(datasets)
@@ -67,7 +70,64 @@ def scan(
             "likely synonyms to merge (e.g. helmet / hard_hat)."
         )
 
-    if write_mapping:
+    if auto:
+        from .automap import suggest_groups
+        groups = suggest_groups(list(index.keys()))
+
+        # Write custom mapping yaml
+        target_classes = sorted({g.target for g in groups})
+
+        lines = [
+            "# remapcv mapping file (auto-generated)",
+            "# Edit the 'mapping' below to merge classes across datasets.",
+            "#   - point synonyms at one target name:  hard_hat: helmet",
+            "#   - drop a class entirely:              background: null",
+            "# 'target_classes' is auto-derived from the mapping when you run `merge`.",
+            "",
+            "target_classes:",
+        ]
+        for tc in target_classes:
+            lines.append(f"- {tc}")
+
+        lines.append("")
+        lines.append("mapping:")
+
+        # Sort groups so output is deterministic
+        for g in sorted(groups, key=lambda x: x.target):
+            lines.append(f"  # {g.target}")
+            if g.confidence < 0.82:
+                lines[-1] += f" (confidence {g.confidence:.2f} - review)"
+
+            for member in sorted(g.members):
+                if g.confidence < 0.82:
+                    lines.append(f"  {member}: {g.target}  # review")
+                else:
+                    lines.append(f"  {member}: {g.target}")
+            lines.append("")
+
+        auto.write_text("\n".join(lines))
+
+        # Print summary table
+        console.print()
+        auto_table = Table(title="Auto-suggested Class Merges")
+        auto_table.add_column("Target Class", style="cyan")
+        auto_table.add_column("Merged Classes")
+        auto_table.add_column("Confidence", justify="right")
+
+        for g in sorted(groups, key=lambda x: x.target):
+            # Only show groups that actually merge multiple classes or have low confidence
+            if len(g.members) > 1:
+                members_str = ", ".join(sorted(g.members))
+                conf_str = f"{g.confidence:.2f}"
+                if g.confidence < 0.82:
+                    conf_str = f"[yellow]{conf_str}[/yellow]"
+                auto_table.add_row(g.target, members_str, conf_str)
+
+        if auto_table.row_count > 0:
+            console.print(auto_table)
+
+        console.print(f"\nAuto-mapping written to [green]{auto}[/green] — review it, then run `remapcv merge`.")
+    elif write_mapping:
         path = write_mapping_skeleton(dss, write_mapping)
         console.print(f"\nStarter mapping written to [green]{path}[/green] — edit it, then run `remapcv merge`.")
 
