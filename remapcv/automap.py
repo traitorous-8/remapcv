@@ -1,6 +1,6 @@
 import difflib
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List, Dict, Set
 
 PPE_HINTS = {
     "helmet": ["helmet", "hard_hat", "hardhat"],
@@ -20,36 +20,37 @@ class Group:
 
 def normalize_name(name: str) -> str:
     n = name.lower().replace("-", "").replace("_", "").replace(" ", "")
-    # Naive singularization
+    # Naive singularization: remove trailing 's' unless it ends with 'ss'
     if n.endswith("s") and len(n) > 1 and not n.endswith("ss"):
         n = n[:-1]
     return n
 
 def get_similarity(n1: str, n2: str) -> float:
     seq_match = difflib.SequenceMatcher(None, n1, n2).ratio()
-    if len(n1) >= 3 and len(n2) >= 3:
+    # Boost similarity if one is a substring of another and they are relatively long
+    if len(n1) >= 4 and len(n2) >= 4:
         if n1 in n2 or n2 in n1:
-            seq_match = max(seq_match, 0.8)
+            seq_match = max(seq_match, 0.85)
     return seq_match
 
 def suggest_groups(names: List[str]) -> List[Group]:
-    # Flatten domain hints for quick lookup
+    # Reverse mapping for quick lookup: normalized synonym -> target hint
     hint_map = {}
     for target, synonyms in PPE_HINTS.items():
         for syn in synonyms:
             hint_map[normalize_name(syn)] = target
-
-    # Also add targets themselves
-    for target in PPE_HINTS.keys():
+        # Also add the target itself
         hint_map[normalize_name(target)] = target
 
     groups: List[Group] = []
-    unassigned = set(names)
 
-    # Pass 1: Combine names by similarity or hint maps
-    clusters = []
+    # We will cluster names
+    clusters: List[List[str]] = [[name] for name in set(names)]
 
-    names_list = list(unassigned)
+    def merge_clusters(i: int, j: int):
+        if i == j: return
+        clusters[i].extend(clusters[j])
+        clusters[j] = []
 
     def get_cluster(name: str) -> int:
         for i, cluster in enumerate(clusters):
@@ -57,14 +58,7 @@ def suggest_groups(names: List[str]) -> List[Group]:
                 return i
         return -1
 
-    for name in names_list:
-        clusters.append([name])
-
-    def merge_clusters(i, j):
-        if i == j: return
-        clusters[i].extend(clusters[j])
-        clusters[j] = []
-
+    names_list = list(set(names))
     for i in range(len(names_list)):
         for j in range(i + 1, len(names_list)):
             n1 = names_list[i]
@@ -74,7 +68,8 @@ def suggest_groups(names: List[str]) -> List[Group]:
 
             c1 = get_cluster(n1)
             c2 = get_cluster(n2)
-            if c1 == c2: continue
+            if c1 == c2 or c1 == -1 or c2 == -1:
+                continue
 
             # Check domain hints
             if norm1 in hint_map and norm2 in hint_map and hint_map[norm1] == hint_map[norm2]:
@@ -89,13 +84,16 @@ def suggest_groups(names: List[str]) -> List[Group]:
     clusters = [c for c in clusters if c]
 
     for cluster in clusters:
-        # Determine target
-        target = min(cluster, key=len) # fallback
+        cluster.sort() # for deterministic output
+
+        target = min(cluster, key=len) # default to shortest name
+
+        # Determine if any member has a domain hint
         for name in cluster:
             norm = normalize_name(name)
             if norm in hint_map:
                 target_hint = hint_map[norm]
-                # Try to find a member that exactly matches the hint if possible
+                # Try to use a member that perfectly matches the hint
                 exact_matches = [m for m in cluster if normalize_name(m) == normalize_name(target_hint)]
                 if exact_matches:
                     target = min(exact_matches, key=len)
@@ -107,7 +105,6 @@ def suggest_groups(names: List[str]) -> List[Group]:
         if len(cluster) == 1:
             confidence = 1.0
         else:
-            # Check if all members are in the same hint group
             all_in_hint = True
             hint_val = None
             for name in cluster:
@@ -124,18 +121,17 @@ def suggest_groups(names: List[str]) -> List[Group]:
             if all_in_hint:
                 confidence = 0.95
             else:
-                # Based on pairwise similarities
                 sims = []
                 for i in range(len(cluster)):
                     for j in range(i + 1, len(cluster)):
                         sims.append(get_similarity(normalize_name(cluster[i]), normalize_name(cluster[j])))
                 if sims:
                     avg_sim = sum(sims) / len(sims)
-                    # if avg_sim < 0.82 it will have a review comment
                     confidence = round(avg_sim, 2)
                 else:
                     confidence = 1.0
 
         groups.append(Group(target=target, members=cluster, confidence=confidence))
 
+    groups.sort(key=lambda g: g.target)
     return groups
