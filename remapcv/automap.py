@@ -1,16 +1,7 @@
 import difflib
 from dataclasses import dataclass
-from typing import List, Dict
+from typing import List
 
-PPE_HINTS = {
-    "helmet": ["helmet", "hard_hat", "hardhat"],
-    "vest": ["vest", "safety_vest"],
-    "person": ["person", "worker", "pedestrian"],
-    "gloves": ["gloves"],
-    "goggles": ["goggles"],
-    "boots": ["boots"],
-    "mask": ["mask"]
-}
 
 @dataclass
 class Group:
@@ -18,124 +9,90 @@ class Group:
     members: List[str]
     confidence: float
 
-def normalize_name(name: str) -> str:
-    n = name.lower().replace("-", "").replace("_", "").replace(" ", "")
-    # Naive singularization
-    if n.endswith("s") and len(n) > 1 and not n.endswith("ss"):
+
+# Domain hints map normalized terms to target group concepts.
+DOMAIN_HINTS = {
+    "helmet": "helmet",
+    "hardhat": "helmet",
+    "vest": "vest",
+    "safetyvest": "vest",
+    "person": "person",
+    "worker": "person",
+    "pedestrian": "person",
+    "glove": "gloves",
+    "gloves": "gloves",
+    "goggle": "goggles",
+    "goggles": "goggles",
+    "boot": "boots",
+    "boots": "boots",
+    "mask": "mask",
+}
+
+
+def normalize_class_name(name: str) -> str:
+    """Normalizes class names (lowercase, strip spaces/dashes/underscores, naive singularization)."""
+    n = name.lower().replace(" ", "").replace("-", "").replace("_", "")
+    # Naive singularization: remove trailing 's' if length is > 3.
+    # Note: domain hints explicitly map "gloves" and "boots" to avoid issues,
+    # but we can do a naive check for un-mapped words.
+    if len(n) > 3 and n.endswith("s") and n not in ["boots", "gloves", "goggles", "glass", "glasses"]:
         n = n[:-1]
     return n
 
-def get_similarity(n1: str, n2: str) -> float:
-    seq_match = difflib.SequenceMatcher(None, n1, n2).ratio()
-    if len(n1) >= 3 and len(n2) >= 3:
-        if n1 in n2 or n2 in n1:
-            seq_match = max(seq_match, 0.8)
-    return seq_match
 
-def suggest_groups(names: List[str]) -> List[Group]:
-    # Flatten domain hints for quick lookup
-    hint_map = {}
-    for target, synonyms in PPE_HINTS.items():
-        for syn in synonyms:
-            hint_map[normalize_name(syn)] = target
+def suggest_groups(class_names: List[str]) -> List[Group]:
+    groups = []
+    processed = set()
 
-    # Also add targets themselves
-    for target in PPE_HINTS.keys():
-        hint_map[normalize_name(target)] = target
+    # 1. Handle Domain Hints
+    hint_groups = {}
+    for name in class_names:
+        if name in processed:
+            continue
+        norm_name = normalize_class_name(name)
+        if norm_name in DOMAIN_HINTS:
+            target_concept = DOMAIN_HINTS[norm_name]
+            if target_concept not in hint_groups:
+                hint_groups[target_concept] = []
+            hint_groups[target_concept].append(name)
+            processed.add(name)
 
-    groups: List[Group] = []
-    unassigned = set(names)
+    for target_concept, members in hint_groups.items():
+        groups.append(Group(target=target_concept, members=members, confidence=0.95))
 
-    # Pass 1: Combine names by similarity or hint maps
-    clusters = []
+    # 2. Handle string similarity and substring matching
+    unprocessed = [n for n in class_names if n not in processed]
 
-    names_list = list(unassigned)
+    while unprocessed:
+        base_name = unprocessed.pop(0)
+        norm_base = normalize_class_name(base_name)
+        current_group_members = [base_name]
 
-    def get_cluster(name: str) -> int:
-        for i, cluster in enumerate(clusters):
-            if name in cluster:
-                return i
-        return -1
+        # Iterate over a copy of unprocessed
+        i = 0
+        while i < len(unprocessed):
+            compare_name = unprocessed[i]
+            norm_compare = normalize_class_name(compare_name)
 
-    for name in names_list:
-        clusters.append([name])
+            # Match conditions
+            similarity = difflib.SequenceMatcher(None, norm_base, norm_compare).ratio()
 
-    def merge_clusters(i, j):
-        if i == j: return
-        clusters[i].extend(clusters[j])
-        clusters[j] = []
-
-    for i in range(len(names_list)):
-        for j in range(i + 1, len(names_list)):
-            n1 = names_list[i]
-            n2 = names_list[j]
-            norm1 = normalize_name(n1)
-            norm2 = normalize_name(n2)
-
-            c1 = get_cluster(n1)
-            c2 = get_cluster(n2)
-            if c1 == c2: continue
-
-            # Check domain hints
-            if norm1 in hint_map and norm2 in hint_map and hint_map[norm1] == hint_map[norm2]:
-                merge_clusters(c1, c2)
-                continue
-
-            # Check similarity
-            sim = get_similarity(norm1, norm2)
-            if sim >= 0.75:
-                merge_clusters(c1, c2)
-
-    clusters = [c for c in clusters if c]
-
-    for cluster in clusters:
-        # Determine target
-        target = min(cluster, key=len) # fallback
-        for name in cluster:
-            norm = normalize_name(name)
-            if norm in hint_map:
-                target_hint = hint_map[norm]
-                # Try to find a member that exactly matches the hint if possible
-                exact_matches = [m for m in cluster if normalize_name(m) == normalize_name(target_hint)]
-                if exact_matches:
-                    target = min(exact_matches, key=len)
-                else:
-                    target = target_hint
-                break
-
-        # Calculate confidence
-        if len(cluster) == 1:
-            confidence = 1.0
-        else:
-            # Check if all members are in the same hint group
-            all_in_hint = True
-            hint_val = None
-            for name in cluster:
-                norm = normalize_name(name)
-                if norm not in hint_map:
-                    all_in_hint = False
-                    break
-                if hint_val is None:
-                    hint_val = hint_map[norm]
-                elif hint_map[norm] != hint_val:
-                    all_in_hint = False
-                    break
-
-            if all_in_hint:
-                confidence = 0.95
+            if similarity > 0.85 or norm_base in norm_compare or norm_compare in norm_base:
+                current_group_members.append(compare_name)
+                unprocessed.pop(i)
             else:
-                # Based on pairwise similarities
-                sims = []
-                for i in range(len(cluster)):
-                    for j in range(i + 1, len(cluster)):
-                        sims.append(get_similarity(normalize_name(cluster[i]), normalize_name(cluster[j])))
-                if sims:
-                    avg_sim = sum(sims) / len(sims)
-                    # if avg_sim < 0.82 it will have a review comment
-                    confidence = round(avg_sim, 2)
-                else:
-                    confidence = 1.0
+                i += 1
 
-        groups.append(Group(target=target, members=cluster, confidence=confidence))
+        # Determine target name for this group: shortest original name (since shortest normalized string)
+        if current_group_members:
+            # We want to use the shortest string as the target name
+            target_name = min(current_group_members, key=len)
+
+            if len(current_group_members) > 1:
+                # Group based on similarity/substring
+                groups.append(Group(target=target_name, members=current_group_members, confidence=0.80))
+            else:
+                # Single item group
+                groups.append(Group(target=target_name, members=current_group_members, confidence=1.0))
 
     return groups
