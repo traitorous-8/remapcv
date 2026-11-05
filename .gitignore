@@ -5,4 +5,3 @@ dist/
 build/
 .venv/
 remapcv_demo/
-.coverage
